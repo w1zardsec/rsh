@@ -43,11 +43,19 @@ type uploadDoneMsg struct {
 type dashModal int
 
 const (
-	modalNone       dashModal = iota
-	modalAction               // pick: Interactive Shell | Upload File
-	modalUploadForm           // enter local + remote paths
-	modalConfirmDel           // y/n confirm disconnect
+	modalNone        dashModal = iota
+	modalAction                // pick: Interactive Shell | Upload File | Post-Ex Tools
+	modalUploadForm            // enter local + remote paths
+	modalPostExTools           // multi-select staged tooling
+	modalConfirmDel            // y/n confirm disconnect
 )
+
+type stagedToolRecord struct {
+	ToolID     string
+	ToolName   string
+	RemotePath string
+	UpdatedAt  time.Time
+}
 
 // ActivityLevel controls the colour of an activity row.
 type ActivityLevel string
@@ -84,6 +92,10 @@ type DashboardModel struct {
 	uploadLocalInput  textinput.Model
 	uploadRemoteInput textinput.Model
 	uploadField       int // 0 = local, 1 = remote
+
+	postExSelections map[string]bool
+	postExStatusMsg  string
+	stagedTools      map[int][]stagedToolRecord
 }
 
 func NewDashboardModel(manager *listenerPkg.Manager) DashboardModel {
@@ -133,6 +145,8 @@ func NewDashboardModel(manager *listenerPkg.Manager) DashboardModel {
 		clientTbl:         ct,
 		uploadLocalInput:  ulIn,
 		uploadRemoteInput: urIn,
+		postExSelections:  make(map[string]bool),
+		stagedTools:       make(map[int][]stagedToolRecord),
 	}
 }
 
@@ -266,6 +280,8 @@ func (m DashboardModel) handleModalKey(msg tea.KeyMsg) (DashboardModel, tea.Cmd)
 		return m.handleActionModalKey(msg)
 	case modalUploadForm:
 		return m.handleUploadFormKey(msg)
+	case modalPostExTools:
+		return m.handlePostExToolsKey(msg)
 	case modalConfirmDel:
 		return m.handleConfirmDelKey(msg)
 	}
@@ -273,7 +289,7 @@ func (m DashboardModel) handleModalKey(msg tea.KeyMsg) (DashboardModel, tea.Cmd)
 }
 
 func (m DashboardModel) handleActionModalKey(msg tea.KeyMsg) (DashboardModel, tea.Cmd) {
-	const numOptions = 2
+	const numOptions = 3
 	switch msg.String() {
 	case "j", "down":
 		m.modalCursor = (m.modalCursor + 1) % numOptions
@@ -287,17 +303,54 @@ func (m DashboardModel) handleActionModalKey(msg tea.KeyMsg) (DashboardModel, te
 			m.activeShell = nil
 			return m, func() tea.Msg { return attachShellMsg{shell: shell} }
 		}
-		// Upload File — transition to upload form
-		m.modal = modalUploadForm
-		m.uploadField = 0
-		m.uploadLocalInput.SetValue("")
-		m.uploadRemoteInput.SetValue("")
-		m.uploadLocalInput.Focus()
-		m.uploadRemoteInput.Blur()
-		return m, textinput.Blink
+		if m.modalCursor == 1 {
+			m.modal = modalUploadForm
+			m.uploadField = 0
+			m.uploadLocalInput.SetValue("")
+			m.uploadRemoteInput.SetValue("")
+			m.uploadLocalInput.Focus()
+			m.uploadRemoteInput.Blur()
+			return m, textinput.Blink
+		}
+		m.modal = modalPostExTools
+		m.postExSelections = make(map[string]bool)
+		m.postExStatusMsg = ""
+		m.modalCursor = 0
+		return m, nil
 	case "esc":
 		m.modal = modalNone
 		m.activeShell = nil
+	}
+	return m, nil
+}
+
+func (m DashboardModel) handlePostExToolsKey(msg tea.KeyMsg) (DashboardModel, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		m.modalCursor = (m.modalCursor + 1) % len(postExTools)
+	case "k", "up":
+		m.modalCursor = (m.modalCursor - 1 + len(postExTools)) % len(postExTools)
+	case " ", "space":
+		tool := postExTools[m.modalCursor]
+		m.postExSelections[tool.ID] = !m.postExSelections[tool.ID]
+		m.postExStatusMsg = ""
+	case "enter":
+		selected := m.selectedPostExToolIDs()
+		if len(selected) == 0 {
+			m.postExStatusMsg = "Select at least one tool."
+			return m, nil
+		}
+		shell := m.activeShell
+		m.modal = modalNone
+		m.activeShell = nil
+		m.postExStatusMsg = ""
+		return m, func() tea.Msg {
+			return postExUploadRequestMsg{shell: shell, toolIDs: selected}
+		}
+	case "esc":
+		m.modal = modalNone
+		m.activeShell = nil
+		m.postExStatusMsg = ""
 	}
 	return m, nil
 }
@@ -406,6 +459,8 @@ func (m DashboardModel) renderModal() string {
 		return m.renderActionModal()
 	case modalUploadForm:
 		return m.renderUploadFormModal()
+	case modalPostExTools:
+		return m.renderPostExToolsModal()
 	case modalConfirmDel:
 		return m.renderConfirmDelModal()
 	}
@@ -419,7 +474,7 @@ func (m DashboardModel) renderActionModal() string {
 			"  " + mutedStyle.Render(m.activeShell.RemoteAddr)
 	}
 
-	options := []string{"Interactive Shell", "Upload File"}
+	options := []string{"Interactive Shell", "Upload File", "Post-Exploitation Tools"}
 	var rows []string
 	for i, opt := range options {
 		if i == m.modalCursor {
@@ -441,6 +496,55 @@ func (m DashboardModel) renderActionModal() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colorFocused).
 		Padding(1, 3).
+		Render(content)
+}
+
+func (m DashboardModel) renderPostExToolsModal() string {
+	header := titleStyle.Render("Stage post-exploitation tooling")
+	if m.activeShell != nil {
+		header = titleStyle.Render(fmt.Sprintf("Shell #%d", m.activeShell.ID)) +
+			"  " + mutedStyle.Render(m.activeShell.RemoteAddr)
+	}
+
+	var rows []string
+	for i, tool := range postExTools {
+		mark := "[ ]"
+		if m.postExSelections[tool.ID] {
+			mark = "[x]"
+		}
+		prefix := mutedStyle.Render(" ")
+		name := valueStyle.Render(tool.Name)
+		if i == m.modalCursor {
+			prefix = focusedLabelStyle.Render("▸")
+			name = focusedLabelStyle.Bold(true).Render(tool.Name)
+		}
+		rows = append(rows,
+			fmt.Sprintf("%s %s %s", prefix, mark, name),
+			"    "+mutedStyle.Render(tool.Description),
+		)
+	}
+
+	statusLine := mutedStyle.Render("Space toggle · Enter upload · Esc cancel")
+	if m.postExStatusMsg != "" {
+		statusLine = errorStyle.Render(m.postExStatusMsg)
+	}
+
+	content := lipgloss.JoinVertical(
+		lipgloss.Left,
+		header,
+		"",
+		strings.Join(rows, "\n"),
+		"",
+		mutedStyle.Render("Client arch is detected over the existing shell. Assets are cached on the operator host and uploaded without needing outbound internet on the client."),
+		"",
+		statusLine,
+	)
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(colorFocused).
+		Padding(1, 3).
+		Width(78).
 		Render(content)
 }
 
@@ -537,7 +641,7 @@ func (m DashboardModel) baseView() string {
 	return lipgloss.JoinVertical(lipgloss.Left, "", columns)
 }
 
-// renderLeftColumn stacks three panes: Listeners / Connected Clients / Port Forwards.
+// renderLeftColumn stacks three panes: clients, listeners, and port-forward status.
 func (m DashboardModel) renderLeftColumn(w, totalH int) string {
 	innerW := w - 2
 	if innerW < 10 {
@@ -605,11 +709,10 @@ func (m DashboardModel) renderLeftColumn(w, totalH int) string {
 	ctContent := m.renderTable(&m.clientTbl, "No connected clients.", innerW, ctH-2)
 	ctPane := pane("Connected Clients", ctContent, w, false)
 
-	// Port forwards (placeholder)
-	pfContent := m.renderPortForwards(innerW, pfH-2)
-	pfPane := pane("Port Forwards", pfContent, w, false)
+	statsContent := m.renderPortForwardStatus(innerW, pfH-2)
+	statsPane := pane("Port Forwarding Status", statsContent, w, false)
 
-	return lipgloss.JoinVertical(lipgloss.Left, ctPane, "", ltPane, "", pfPane)
+	return lipgloss.JoinVertical(lipgloss.Left, ctPane, "", ltPane, "", statsPane)
 }
 
 // renderEventLog produces the right-column event-log pane.
@@ -638,13 +741,68 @@ func (m DashboardModel) renderTable(t *table.Model, emptyMsg string, innerW, inn
 	return padLines(content, innerH, innerW)
 }
 
-func (m DashboardModel) renderPortForwards(innerW, innerH int) string {
-	row := " " + mutedStyle.Render("No port forwards configured.")
-	pad := innerW - lipgloss.Width(row)
-	if pad < 0 {
-		pad = 0
+func (m DashboardModel) renderPortForwardStatus(innerW, innerH int) string {
+	activeForwards := 0
+	var readyRows []string
+	for shellID, tools := range m.stagedTools {
+		if m.manager.FindShell(shellID) == nil {
+			continue
+		}
+		for _, tool := range tools {
+			if tool.ToolID != "chisel" {
+				continue
+			}
+			readyRows = append(readyRows, fmt.Sprintf(" Shell #%d  %s  ready", shellID, tool.RemotePath))
+		}
 	}
-	return padLines(row+strings.Repeat(" ", pad), innerH, innerW)
+
+	lines := []string{
+		fmt.Sprintf(" %s  %s", mutedStyle.Render("Active Forwards"), valueStyle.Render(fmt.Sprintf("%d", activeForwards))),
+		fmt.Sprintf(" %s  %s", mutedStyle.Render("Chisel Ready"), valueStyle.Render(fmt.Sprintf("%d", len(readyRows)))),
+	}
+	if len(readyRows) == 0 {
+		lines = append(lines,
+			" "+mutedStyle.Render("No active forwards or staged Chisel binaries."),
+			" "+mutedStyle.Render("Stage Chisel from the client action menu to prepare tunneling."),
+		)
+	} else {
+		lines = append(lines, " "+mutedStyle.Render("Staged Clients"))
+		lines = append(lines, readyRows...)
+	}
+
+	return padLines(strings.Join(lines, "\n"), innerH, innerW)
+}
+
+func (m DashboardModel) selectedPostExToolIDs() []string {
+	selected := make([]string, 0, len(postExTools))
+	for _, tool := range postExTools {
+		if m.postExSelections[tool.ID] {
+			selected = append(selected, tool.ID)
+		}
+	}
+	return selected
+}
+
+func (m *DashboardModel) MarkStagedTool(shellID int, toolID, toolName, remotePath string) {
+	records := m.stagedTools[shellID]
+	for i := range records {
+		if records[i].ToolID == toolID {
+			records[i].RemotePath = remotePath
+			records[i].UpdatedAt = time.Now()
+			m.stagedTools[shellID] = records
+			return
+		}
+	}
+	m.stagedTools[shellID] = append(records, stagedToolRecord{
+		ToolID:     toolID,
+		ToolName:   toolName,
+		RemotePath: remotePath,
+		UpdatedAt:  time.Now(),
+	})
+}
+
+func (m *DashboardModel) ClearStagedTools(shellID int) {
+	delete(m.stagedTools, shellID)
 }
 
 func (m DashboardModel) renderActivity(innerW, maxLines int) string {

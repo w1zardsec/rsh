@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -49,6 +50,22 @@ func drainStdin() {
 // Run bridges stdin ↔ conn until F12 is pressed or the connection is closed.
 func (s *InteractiveSession) Run() error {
 	fd := os.Stdin.Fd()
+	var writeMu sync.Mutex
+	done := make(chan error, 2)
+
+	writeRemote := func(payload string) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_, err := io.WriteString(s.conn, payload)
+		return err
+	}
+
+	writeRemoteBytes := func(payload []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_, err := s.conn.Write(payload)
+		return err
+	}
 
 	// Put the local terminal into raw mode so every keystroke is sent
 	// immediately and control characters pass through.
@@ -71,10 +88,15 @@ func (s *InteractiveSession) Run() error {
 	defer signal.Stop(sigCh)
 	go func() {
 		for range sigCh {
+			if err := sendRemoteResize(fd, writeRemote); err != nil {
+				select {
+				case done <- err:
+				default:
+				}
+				return
+			}
 		}
 	}()
-
-	done := make(chan error, 2)
 
 	// remote → local stdout
 	go func() {
@@ -88,20 +110,15 @@ func (s *InteractiveSession) Run() error {
 	upgradePayload := "python3 -c 'import pty; pty.spawn(\"/bin/bash\")' 2>/dev/null || " +
 		"python -c 'import pty; pty.spawn(\"/bin/bash\")' 2>/dev/null || " +
 		"script -qc /bin/bash /dev/null\n"
-	s.conn.Write([]byte(upgradePayload)) //nolint:errcheck
+	writeRemote(upgradePayload) //nolint:errcheck
 
 	// Wait for the remote PTY to initialise, then push terminal dimensions,
 	// set TERM, clear the screen, and print the detach hint — all as a single
 	// remote command so the hint flows through io.Copy in the correct order.
 	time.Sleep(400 * time.Millisecond)
-	w, h, err := xterm.GetSize(fd)
 	hint := `printf '\033[33m[rsh]\033[0m Attached \xe2\x80\x94 press \033[1mF12\033[22m to detach\r\n\r\n'`
-	if err == nil {
-		s.conn.Write([]byte(fmt.Sprintf( //nolint:errcheck
-			"stty rows %d columns %d 2>/dev/null; export TERM=xterm-256color; export SHELL=/bin/bash; clear; %s\n", h, w, hint,
-		)))
-	} else {
-		s.conn.Write([]byte(fmt.Sprintf("export TERM=xterm-256color; export SHELL=/bin/bash; clear; %s\n", hint))) //nolint:errcheck
+	if err := sendRemoteInit(fd, hint, writeRemote); err != nil {
+		return err
 	}
 
 	// local stdin → remote; watch for F12 to detach
@@ -116,7 +133,7 @@ func (s *InteractiveSession) Run() error {
 					done <- nil
 					return
 				}
-				if _, werr := s.conn.Write(chunk); werr != nil {
+				if werr := writeRemoteBytes(chunk); werr != nil {
 					done <- werr
 					return
 				}
@@ -132,4 +149,28 @@ func (s *InteractiveSession) Run() error {
 
 	os.Stdout.WriteString("\r\n\033[33m[rsh]\033[0m Detached from shell.\r\n") //nolint:errcheck
 	return nil
+}
+
+func sendRemoteInit(fd uintptr, hint string, writeRemote func(string) error) error {
+	w, h, err := xterm.GetSize(fd)
+	if err == nil {
+		return writeRemote(fmt.Sprintf(
+			"stty rows %d columns %d 2>/dev/null; export TERM=xterm-256color; export SHELL=/bin/bash; clear; %s\n",
+			h,
+			w,
+			hint,
+		))
+	}
+	return writeRemote(fmt.Sprintf(
+		"export TERM=xterm-256color; export SHELL=/bin/bash; clear; %s\n",
+		hint,
+	))
+}
+
+func sendRemoteResize(fd uintptr, writeRemote func(string) error) error {
+	w, h, err := xterm.GetSize(fd)
+	if err != nil {
+		return nil
+	}
+	return writeRemote(fmt.Sprintf("stty rows %d columns %d 2>/dev/null\n", h, w))
 }

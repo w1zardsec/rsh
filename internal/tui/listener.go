@@ -3,7 +3,9 @@ package tui
 import (
 	"fmt"
 	"net"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -44,13 +46,20 @@ func (n NetIface) Display() string {
 }
 
 func loadInterfaces() []NetIface {
-	result := []NetIface{{Name: "all", Addr: "0.0.0.0"}}
+	result := []NetIface{
+		{Name: "all", Addr: "0.0.0.0"},
+		{Name: "loopback", Addr: "127.0.0.1"},
+	}
+	seen := map[string]struct{}{
+		"0.0.0.0":   {},
+		"127.0.0.1": {},
+	}
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return result
 	}
 	for _, iface := range ifaces {
-		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
+		if iface.Flags&net.FlagUp == 0 {
 			continue
 		}
 		addrs, err := iface.Addrs()
@@ -69,12 +78,43 @@ func loadInterfaces() []NetIface {
 				continue
 			}
 			if ip4 := ip.To4(); ip4 != nil {
+				if _, ok := seen[ip4.String()]; ok {
+					break
+				}
+				seen[ip4.String()] = struct{}{}
 				result = append(result, NetIface{Name: iface.Name, Addr: ip4.String()})
 				break
 			}
 		}
 	}
+	sort.Slice(result[2:], func(i, j int) bool {
+		left := result[i+2]
+		right := result[j+2]
+		if left.Name == right.Name {
+			return left.Addr < right.Addr
+		}
+		return left.Name < right.Name
+	})
 	return result
+}
+
+var portPattern = regexp.MustCompile(`^\d{1,5}$`)
+
+func validatePort(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	if !portPattern.MatchString(raw) {
+		return fmt.Errorf("port must be numeric")
+	}
+	port, err := strconv.Atoi(raw)
+	if err != nil {
+		return fmt.Errorf("invalid port: %w", err)
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535")
+	}
+	return nil
 }
 
 // ── Model ─────────────────────────────────────────────────────────────────────
@@ -111,6 +151,7 @@ func NewListenerModel(manager *listenerPkg.Manager, shellCh chan listenerPkg.She
 	pi.Placeholder = "4444"
 	pi.CharLimit = 5
 	pi.Prompt = ""
+	pi.Validate = validatePort
 
 	// Listener table
 	ltCols := []table.Column{
@@ -156,7 +197,7 @@ func listenerTableStyles() table.Styles {
 
 func (m ListenerModel) cmdStartListener() tea.Cmd {
 	opt := m.ifaceOptions[m.ifaceIdx]
-	port := m.portInput.Value()
+	port := strings.TrimSpace(m.portInput.Value())
 	if port == "" {
 		port = "4444"
 	}
@@ -257,6 +298,12 @@ func (m ListenerModel) handleInsertMode(msg tea.KeyMsg) (ListenerModel, tea.Cmd)
 	case "enter":
 		if m.formField == 0 {
 			return m.cycleFormField(1)
+		}
+		port := strings.TrimSpace(m.portInput.Value())
+		if err := validatePort(port); err != nil {
+			m.statusMsg = err.Error()
+			m.statusOK = false
+			return m, nil
 		}
 		return m, m.cmdStartListener()
 	}

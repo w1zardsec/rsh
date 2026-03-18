@@ -137,6 +137,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case shellRemovedMsg:
 		if err := m.manager.RemoveShell(msg.shellID); err == nil {
+			m.dashboard.ClearStagedTools(msg.shellID)
 			m.dashboard.AddActivity(LevelWarning,
 				fmt.Sprintf("Shell #%d removed.", msg.shellID))
 			m.dashboard.RefreshTables()
@@ -158,10 +159,42 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case uploadDoneMsg:
 		if msg.err != nil {
 			m.dashboard.AddActivity(LevelError,
-				fmt.Sprintf("Shell #%d — upload failed to send: %s", msg.shellID, msg.err))
+				fmt.Sprintf("Shell #%d — upload failed: %s", msg.shellID, msg.err))
 		} else {
 			m.dashboard.AddActivity(LevelSuccess,
-				fmt.Sprintf("Shell #%d — upload sent (check shell for result).", msg.shellID))
+				fmt.Sprintf("Shell #%d — upload completed.", msg.shellID))
+		}
+		return m, nil
+
+	case postExUploadRequestMsg:
+		toolNames := strings.Join(postExToolNames(msg.toolIDs), ", ")
+		m.dashboard.AddActivity(LevelInfo,
+			fmt.Sprintf("Staging %s for Shell #%d...", toolNames, msg.shell.ID))
+		shell := msg.shell
+		toolIDs := append([]string(nil), msg.toolIDs...)
+		return m, func() tea.Msg {
+			return stagePostExTools(shell, toolIDs)
+		}
+
+	case postExUploadDoneMsg:
+		for _, uploaded := range msg.uploaded {
+			if uploaded.ToolID == "chisel" {
+				m.dashboard.MarkStagedTool(msg.shellID, uploaded.ToolID, uploaded.ToolName, uploaded.RemotePath)
+			}
+			m.dashboard.AddActivity(
+				LevelSuccess,
+				fmt.Sprintf(
+					"Shell #%d — staged %s to %s (%s).",
+					msg.shellID,
+					uploaded.ToolName,
+					uploaded.RemotePath,
+					msg.host.Label(),
+				),
+			)
+		}
+		if msg.err != nil {
+			m.dashboard.AddActivity(LevelError,
+				fmt.Sprintf("Shell #%d — post-ex staging failed: %s", msg.shellID, msg.err))
 		}
 		return m, nil
 

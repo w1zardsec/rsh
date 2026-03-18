@@ -40,6 +40,14 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea), `rsh` keeps
 - Choose the destination path from the dashboard flow
 - Keep delivery inside the same operator interface
 
+### Post-Exploitation Tooling
+
+- Stage post-exploitation tools directly from the client action menu
+- Multi-select LinPEAS and Chisel with a single workflow
+- Detect the remote Linux architecture over the existing shell
+- Download release assets to the operator cache, then upload them to the client
+- Keep the client fully offline during tool staging
+
 ### Payload Generation
 
 - Generate ready-to-use reverse shell one-liners
@@ -56,6 +64,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea), `rsh` keeps
 - Separate views for Dashboard, Listener, and Payload workflows
 - Fast shell actions from the connected-client table
 - Compact terminal-first workflow for lab operations
+- Dashboard visibility for staged Chisel port-forward tooling
 
 ## Capabilities
 
@@ -66,6 +75,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea), `rsh` keeps
 - Interactive shell attachment
 - Session disconnect handling
 - Basic file upload through active sessions
+- Post-exploitation tool staging for Linux lab shells
 - Clipboard-friendly payload generation
 - Event visibility inside the TUI
 
@@ -124,7 +134,8 @@ Listener workflow:
 Dashboard workflow:
 
 - `Enter` opens shell actions
-- Choose interactive shell or file upload
+- Choose interactive shell, file upload, or post-exploitation tooling
+- In the post-ex tooling modal, use `Space` to multi-select and `Enter` to stage uploads
 - `d` removes the selected shell
 
 Payload workflow:
